@@ -163,6 +163,77 @@
             font-weight: bold;
         }
 
+        .battle-bar-container {
+            margin: 25px 0;
+            background: rgba(255,255,255,0.1);
+            padding: 20px;
+            border-radius: 15px;
+        }
+
+        .battle-bar-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+
+        .player-info {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .player-color {
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            border: 2px solid white;
+        }
+
+        .player1-color {
+            background: #ff4757;
+        }
+
+        .player2-color {
+            background: #3742fa;
+        }
+
+        .battle-bar {
+            height: 40px;
+            background: #ddd;
+            border-radius: 20px;
+            overflow: hidden;
+            position: relative;
+            border: 3px solid white;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.2);
+        }
+
+        .battle-progress {
+            height: 100%;
+            display: flex;
+            transition: all 0.3s ease;
+        }
+
+        .player1-progress {
+            background: linear-gradient(45deg, #ff4757, #ff6b7a);
+            border-right: 2px solid white;
+        }
+
+        .player2-progress {
+            background: linear-gradient(45deg, #3742fa, #5352ed);
+        }
+
+        .battle-bar-center {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: 4px;
+            height: 100%;
+            background: white;
+            box-shadow: 0 0 10px rgba(0,0,0,0.3);
+        }
+
         .timer {
             font-size: 3rem;
             font-weight: bold;
@@ -266,14 +337,29 @@
                 </div>
             </div>
 
-            <div class="scores">
-                <div class="player-score">
-                    <div class="player-name" id="player1Name">Player 1</div>
-                    <div class="score" id="player1Score">0</div>
+            <div class="battle-bar-container">
+                <div class="battle-bar-header">
+                    <div class="player-info">
+                        <div class="player-color player1-color"></div>
+                        <div>
+                            <div class="player-name" id="battlePlayer1Name">Player 1</div>
+                            <div class="score" id="battlePlayer1Score">0</div>
+                        </div>
+                    </div>
+                    <div class="player-info">
+                        <div>
+                            <div class="player-name" id="battlePlayer2Name">Player 2</div>
+                            <div class="score" id="battlePlayer2Score">0</div>
+                        </div>
+                        <div class="player-color player2-color"></div>
+                    </div>
                 </div>
-                <div class="player-score">
-                    <div class="player-name" id="player2Name">Player 2</div>
-                    <div class="score" id="player2Score">0</div>
+                <div class="battle-bar">
+                    <div class="battle-progress">
+                        <div class="player1-progress" id="player1Progress" style="width: 50%;"></div>
+                        <div class="player2-progress" id="player2Progress" style="width: 50%;"></div>
+                    </div>
+                    <div class="battle-bar-center"></div>
                 </div>
             </div>
 
@@ -431,7 +517,7 @@
                 } else {
                     showScreen('game-screen');
                     updateGameInfo(gameData);
-                    startClientTimer(gameData.timeLeft || 10);
+                    // Timer is now handled by Firebase sync, no need for local timer
                 }
             } else if (gameData.gameStatus === 'finished') {
                 showResults(gameData);
@@ -458,69 +544,109 @@
                     players[playerName].score = 0;
                 });
 
+                // Set initial game state with proper timer
                 await set(gameState.gameRef, {
                     ...gameData,
                     players: players,
                     gameStatus: 'playing',
                     timeLeft: 10,
-                    startTime: serverTimestamp()
+                    startTime: Date.now(),
+                    lastTimerUpdate: Date.now()
                 });
+
+                // Start the master timer (only one player should control this)
+                const playerNames = Object.keys(players);
+                const isFirstPlayer = playerNames.sort()[0] === gameState.playerName;
+                
+                if (isFirstPlayer) {
+                    startMasterTimer();
+                }
 
             } catch (error) {
                 console.error('Error starting game:', error);
             }
         }
 
-        function updateGameInfo(gameData) {
-            document.getElementById('gameAmount').textContent = `$${gameData.billAmount}`;
-            const players = Object.values(gameData.players || {});
+        function startMasterTimer() {
+            let timeLeft = 10;
             
-            if (players.length >= 2) {
-                document.getElementById('player1Name').textContent = players[0].name;
-                document.getElementById('player2Name').textContent = players[1].name;
-                document.getElementById('player1Score').textContent = players[0].score || 0;
-                document.getElementById('player2Score').textContent = players[1].score || 0;
-            }
-        }
-
-        function updateGameScreen(gameData) {
-            updateGameInfo(gameData);
-            if (gameData.timeLeft !== undefined) {
-                document.getElementById('timer').textContent = gameData.timeLeft;
-            }
-        }
-
-        function startClientTimer(initialTime) {
-            let timeLeft = initialTime;
-            document.getElementById('timer').textContent = timeLeft;
-            
-            if (gameState.gameTimer) {
-                clearInterval(gameState.gameTimer);
-            }
-            
-            gameState.gameTimer = setInterval(async () => {
+            const timerInterval = setInterval(async () => {
                 timeLeft--;
-                document.getElementById('timer').textContent = Math.max(0, timeLeft);
                 
-                if (timeLeft <= 0) {
-                    clearInterval(gameState.gameTimer);
-                    gameState.gameTimer = null;
+                try {
+                    const snapshot = await get(gameState.gameRef);
+                    const gameData = snapshot.val();
                     
-                    // End the game
-                    try {
-                        const snapshot = await get(gameState.gameRef);
-                        const gameData = snapshot.val();
+                    if (gameData.gameStatus !== 'playing') {
+                        clearInterval(timerInterval);
+                        return;
+                    }
+                    
+                    // Update the timer in Firebase
+                    await set(gameState.gameRef, {
+                        ...gameData,
+                        timeLeft: Math.max(0, timeLeft),
+                        lastTimerUpdate: Date.now()
+                    });
+                    
+                    if (timeLeft <= 0) {
+                        clearInterval(timerInterval);
                         
+                        // End the game
                         await set(gameState.gameRef, {
                             ...gameData,
                             gameStatus: 'finished',
                             timeLeft: 0
                         });
-                    } catch (error) {
-                        console.error('Error ending game:', error);
                     }
+                } catch (error) {
+                    console.error('Error updating timer:', error);
+                    clearInterval(timerInterval);
                 }
             }, 1000);
+        }
+
+        function updateGameInfo(gameData) {
+            document.getElementById('gameAmount').textContent = `${gameData.billAmount}`;
+            const players = Object.values(gameData.players || {});
+            
+            if (players.length >= 2) {
+                // Update battle bar player names and scores
+                document.getElementById('battlePlayer1Name').textContent = players[0].name;
+                document.getElementById('battlePlayer2Name').textContent = players[1].name;
+                document.getElementById('battlePlayer1Score').textContent = players[0].score || 0;
+                document.getElementById('battlePlayer2Score').textContent = players[1].score || 0;
+                
+                // Update progress bar
+                updateBattleBar(players[0].score || 0, players[1].score || 0);
+            }
+        }
+
+        function updateBattleBar(score1, score2) {
+            const total = score1 + score2;
+            let player1Percentage = 50;
+            let player2Percentage = 50;
+            
+            if (total > 0) {
+                player1Percentage = (score1 / total) * 100;
+                player2Percentage = (score2 / total) * 100;
+            }
+            
+            document.getElementById('player1Progress').style.width = player1Percentage + '%';
+            document.getElementById('player2Progress').style.width = player2Percentage + '%';
+        }
+
+        function updateGameScreen(gameData) {
+            updateGameInfo(gameData);
+            
+            // Update timer display
+            const timeLeft = gameData.timeLeft !== undefined ? gameData.timeLeft : 10;
+            document.getElementById('timer').textContent = Math.max(0, timeLeft);
+        }
+
+        function startClientTimer(initialTime) {
+            // Remove this function as we now use Firebase-synced timer
+            // The timer is handled by updateGameScreen
         }
 
         window.handleTap = async function() {
