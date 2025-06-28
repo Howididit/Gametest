@@ -204,6 +204,20 @@
             border-radius: 5px;
             margin: 10px 0;
         }
+
+        .loading {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 3px solid rgba(255,255,255,0.3);
+            border-radius: 50%;
+            border-top-color: #fff;
+            animation: spin 1s ease-in-out infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
     </style>
 </head>
 <body>
@@ -232,7 +246,7 @@
 
         <!-- Waiting Screen -->
         <div class="waiting-screen">
-            <h2>Waiting for opponent...</h2>
+            <h2>Waiting for opponent... <span class="loading"></span></h2>
             <p class="status">Game ID: <strong id="currentGameId"></strong></p>
             <p>Share this ID with your friend!</p>
             <div id="waitingStatus"></div>
@@ -301,40 +315,35 @@
         </div>
     </div>
 
+    <!-- Firebase SDK -->
     <script type="module">
-        // Simple WebSocket-like implementation using a mock server
-        // In a real deployment, you'd use Firebase Realtime Database or WebSockets
-        
+        // Import Firebase modules
+        import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js';
+        import { getDatabase, ref, set, get, onValue, off, serverTimestamp } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-database.js';
+
+        // Firebase configuration
+        const firebaseConfig = {
+            apiKey: "AIzaSyBGx0pnLLJueDdDXyKpocVsPS9NYvMbr-I",
+            authDomain: "gametest-b5e5b.firebaseapp.com",
+            databaseURL: "https://gametest-b5e5b-default-rtdb.europe-west1.firebasedatabase.app",
+            projectId: "gametest-b5e5b",
+            storageBucket: "gametest-b5e5b.firebasestorage.app",
+            messagingSenderId: "289842811696",
+            appId: "1:289842811696:web:0e5e95336d2d26320e6ef5"
+        };
+
+        // Initialize Firebase
+        const app = initializeApp(firebaseConfig);
+        const database = getDatabase(app);
+
         let gameState = {
             gameId: null,
             playerName: null,
             billAmount: 100,
-            players: {},
-            scores: {},
-            gameStatus: 'waiting', // waiting, playing, finished
-            timeLeft: 10,
+            gameRef: null,
+            gameListener: null,
             gameTimer: null
         };
-
-        // Mock real-time database (replace with Firebase in production)
-        let mockDatabase = {};
-        let subscribers = {};
-
-        function subscribe(path, callback) {
-            if (!subscribers[path]) subscribers[path] = [];
-            subscribers[path].push(callback);
-        }
-
-        function update(path, data) {
-            mockDatabase[path] = { ...mockDatabase[path], ...data };
-            if (subscribers[path]) {
-                subscribers[path].forEach(callback => callback(mockDatabase[path]));
-            }
-        }
-
-        function get(path) {
-            return mockDatabase[path] || {};
-        }
 
         // Game functions
         window.generateGameId = function() {
@@ -342,7 +351,7 @@
             document.getElementById('gameId').value = id;
         };
 
-        window.joinGame = function() {
+        window.joinGame = async function() {
             const billAmount = parseFloat(document.getElementById('billAmount').value);
             const playerName = document.getElementById('playerName').value.trim();
             const gameId = document.getElementById('gameId').value.trim().toUpperCase();
@@ -360,39 +369,52 @@
                 return;
             }
 
-            gameState.billAmount = billAmount;
-            gameState.playerName = playerName;
-            gameState.gameId = gameId;
+            try {
+                gameState.billAmount = billAmount;
+                gameState.playerName = playerName;
+                gameState.gameId = gameId;
+                gameState.gameRef = ref(database, `games/${gameId}`);
 
-            // Join the game
-            const currentGame = get(`games/${gameId}`) || {};
-            const players = currentGame.players || {};
-            
-            if (Object.keys(players).length >= 2 && !players[playerName]) {
-                showError('Game is full');
-                return;
+                // Check if game exists and get current state
+                const snapshot = await get(gameState.gameRef);
+                const currentGame = snapshot.val() || {};
+                const players = currentGame.players || {};
+
+                // Check if game is full
+                if (Object.keys(players).length >= 2 && !players[playerName]) {
+                    showError('Game is full');
+                    return;
+                }
+
+                // Add player to game
+                players[playerName] = {
+                    name: playerName,
+                    score: 0,
+                    joinedAt: serverTimestamp()
+                };
+
+                // Update game data
+                await set(gameState.gameRef, {
+                    billAmount: billAmount,
+                    players: players,
+                    gameStatus: Object.keys(players).length === 2 ? 'ready' : 'waiting',
+                    lastUpdated: serverTimestamp()
+                });
+
+                showScreen('waiting-screen');
+                document.getElementById('currentGameId').textContent = gameId;
+
+                // Listen for game updates
+                gameState.gameListener = onValue(gameState.gameRef, handleGameUpdate);
+
+            } catch (error) {
+                console.error('Error joining game:', error);
+                showError('Failed to join game. Please try again.');
             }
-
-            players[playerName] = {
-                name: playerName,
-                score: 0,
-                joined: Date.now()
-            };
-
-            update(`games/${gameId}`, {
-                billAmount: billAmount,
-                players: players,
-                gameStatus: Object.keys(players).length === 2 ? 'ready' : 'waiting'
-            });
-
-            showScreen('waiting-screen');
-            document.getElementById('currentGameId').textContent = gameId;
-
-            // Subscribe to game updates
-            subscribe(`games/${gameId}`, handleGameUpdate);
         };
 
-        function handleGameUpdate(gameData) {
+        function handleGameUpdate(snapshot) {
+            const gameData = snapshot.val();
             if (!gameData) return;
 
             const players = Object.values(gameData.players || {});
@@ -400,10 +422,17 @@
             if (gameData.gameStatus === 'waiting' || gameData.gameStatus === 'ready') {
                 updateWaitingScreen(players);
                 if (gameData.gameStatus === 'ready' && players.length === 2) {
-                    setTimeout(startGame, 2000);
+                    // Start game after a short delay
+                    setTimeout(() => startGame(), 2000);
                 }
             } else if (gameData.gameStatus === 'playing') {
-                updateGameScreen(gameData);
+                if (document.querySelector('.game-screen').classList.contains('active')) {
+                    updateGameScreen(gameData);
+                } else {
+                    showScreen('game-screen');
+                    updateGameInfo(gameData);
+                    startClientTimer(gameData.timeLeft || 10);
+                }
             } else if (gameData.gameStatus === 'finished') {
                 showResults(gameData);
             }
@@ -418,30 +447,33 @@
             }
         }
 
-        function startGame() {
-            const gameData = get(`games/${gameState.gameId}`);
-            const players = Object.values(gameData.players);
-            
-            // Reset scores
-            players.forEach(player => {
-                gameData.players[player.name].score = 0;
-            });
+        async function startGame() {
+            try {
+                const snapshot = await get(gameState.gameRef);
+                const gameData = snapshot.val();
+                const players = gameData.players || {};
+                
+                // Reset scores
+                Object.keys(players).forEach(playerName => {
+                    players[playerName].score = 0;
+                });
 
-            update(`games/${gameState.gameId}`, {
-                ...gameData,
-                gameStatus: 'playing',
-                timeLeft: 10,
-                startTime: Date.now()
-            });
+                await set(gameState.gameRef, {
+                    ...gameData,
+                    players: players,
+                    gameStatus: 'playing',
+                    timeLeft: 10,
+                    startTime: serverTimestamp()
+                });
 
-            showScreen('game-screen');
-            updateGameInfo(gameData);
-            startTimer();
+            } catch (error) {
+                console.error('Error starting game:', error);
+            }
         }
 
         function updateGameInfo(gameData) {
             document.getElementById('gameAmount').textContent = `$${gameData.billAmount}`;
-            const players = Object.values(gameData.players);
+            const players = Object.values(gameData.players || {});
             
             if (players.length >= 2) {
                 document.getElementById('player1Name').textContent = players[0].name;
@@ -453,61 +485,74 @@
 
         function updateGameScreen(gameData) {
             updateGameInfo(gameData);
-            document.getElementById('timer').textContent = gameData.timeLeft || 0;
+            if (gameData.timeLeft !== undefined) {
+                document.getElementById('timer').textContent = gameData.timeLeft;
+            }
         }
 
-        function startTimer() {
-            let timeLeft = 10;
+        function startClientTimer(initialTime) {
+            let timeLeft = initialTime;
             document.getElementById('timer').textContent = timeLeft;
             
-            gameState.gameTimer = setInterval(() => {
+            if (gameState.gameTimer) {
+                clearInterval(gameState.gameTimer);
+            }
+            
+            gameState.gameTimer = setInterval(async () => {
                 timeLeft--;
-                document.getElementById('timer').textContent = timeLeft;
+                document.getElementById('timer').textContent = Math.max(0, timeLeft);
                 
-                update(`games/${gameState.gameId}`, {
-                    ...get(`games/${gameState.gameId}`),
-                    timeLeft: timeLeft
-                });
-
                 if (timeLeft <= 0) {
-                    endGame();
+                    clearInterval(gameState.gameTimer);
+                    gameState.gameTimer = null;
+                    
+                    // End the game
+                    try {
+                        const snapshot = await get(gameState.gameRef);
+                        const gameData = snapshot.val();
+                        
+                        await set(gameState.gameRef, {
+                            ...gameData,
+                            gameStatus: 'finished',
+                            timeLeft: 0
+                        });
+                    } catch (error) {
+                        console.error('Error ending game:', error);
+                    }
                 }
             }, 1000);
         }
 
-        window.handleTap = function() {
-            const gameData = get(`games/${gameState.gameId}`);
-            if (gameData.gameStatus !== 'playing') return;
-
-            // Increment player's score
-            const players = gameData.players;
-            if (players[gameState.playerName]) {
-                players[gameState.playerName].score = (players[gameState.playerName].score || 0) + 1;
+        window.handleTap = async function() {
+            try {
+                const snapshot = await get(gameState.gameRef);
+                const gameData = snapshot.val();
                 
-                update(`games/${gameState.gameId}`, {
-                    ...gameData,
-                    players: players
-                });
+                if (gameData.gameStatus !== 'playing') return;
+
+                const players = gameData.players || {};
+                if (players[gameState.playerName]) {
+                    players[gameState.playerName].score = (players[gameState.playerName].score || 0) + 1;
+                    
+                    await set(gameState.gameRef, {
+                        ...gameData,
+                        players: players
+                    });
+                }
+            } catch (error) {
+                console.error('Error updating tap:', error);
             }
         };
 
-        function endGame() {
+        function showResults(gameData) {
             if (gameState.gameTimer) {
                 clearInterval(gameState.gameTimer);
                 gameState.gameTimer = null;
             }
-
-            const gameData = get(`games/${gameState.gameId}`);
-            update(`games/${gameState.gameId}`, {
-                ...gameData,
-                gameStatus: 'finished'
-            });
-        }
-
-        function showResults(gameData) {
+            
             showScreen('result-screen');
             
-            const players = Object.values(gameData.players);
+            const players = Object.values(gameData.players || {});
             const totalTaps = players.reduce((sum, player) => sum + (player.score || 0), 0);
             
             if (players.length >= 2) {
@@ -541,15 +586,21 @@
         }
 
         window.startNewGame = function() {
+            // Clean up current game
+            if (gameState.gameListener) {
+                off(gameState.gameRef, 'value', gameState.gameListener);
+            }
+            if (gameState.gameTimer) {
+                clearInterval(gameState.gameTimer);
+            }
+            
             // Reset game state
             gameState = {
                 gameId: null,
                 playerName: null,
                 billAmount: 100,
-                players: {},
-                scores: {},
-                gameStatus: 'waiting',
-                timeLeft: 10,
+                gameRef: null,
+                gameListener: null,
                 gameTimer: null
             };
             
